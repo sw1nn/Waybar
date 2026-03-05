@@ -144,6 +144,8 @@ Mpris::Mpris(const std::string& id, const Json::Value& config)
     if (error) {
       throw std::runtime_error(fmt::format("unable to list players: {}", error->message));
     }
+    waybar::util::ScopeGuard players_deleter(
+        [&players]() { g_list_free_full(players, (GDestroyNotify)playerctl_player_name_free); });
 
     for (auto* p = players; p != nullptr; p = p->next) {
       auto* pn = static_cast<PlayerctlPlayerName*>(p->data);
@@ -184,9 +186,7 @@ Mpris::~Mpris() {
   if (player != nullptr) {
     g_signal_handlers_disconnect_by_data(player, this);
   }
-  if (last_active_player_ != nullptr && last_active_player_ != player) {
-    g_object_unref(last_active_player_);
-  }
+  g_clear_object(&last_active_player_);
   g_clear_object(&manager);
   g_clear_object(&player);
 }
@@ -419,6 +419,7 @@ auto Mpris::onPlayerNameAppeared(PlayerctlPlayerManager* manager, PlayerctlPlaye
     return;
   }
 
+  g_clear_object(&mpris->last_active_player_);
   if (mpris->player != nullptr) {
     g_signal_handlers_disconnect_by_data(mpris->player, mpris);
     g_clear_object(&mpris->player);
@@ -441,7 +442,11 @@ auto Mpris::onPlayerNameVanished(PlayerctlPlayerManager* manager, PlayerctlPlaye
   if (mpris->player_ == "playerctld") {
     mpris->dp.emit();
   } else if (mpris->player_ == player_name->name) {
-    mpris->player = nullptr;
+    g_clear_object(&mpris->last_active_player_);
+    if (mpris->player != nullptr) {
+      g_signal_handlers_disconnect_by_data(mpris->player, mpris);
+      g_clear_object(&mpris->player);
+    }
     mpris->event_box_.set_visible(false);
     mpris->dp.emit();
   }
@@ -498,11 +503,8 @@ auto Mpris::getPlayerInfo() -> std::optional<PlayerInfo> {
   char* player_status = nullptr;
   auto player_playback_status = PLAYERCTL_PLAYBACK_STATUS_STOPPED;
 
-  // Clean up previous fallback player
-  if (last_active_player_ && last_active_player_ != player) {
-    g_object_unref(last_active_player_);
-    last_active_player_ = nullptr;
-  }
+  // Clean up previous fallback player (always unref; we hold our own ref)
+  g_clear_object(&last_active_player_);
 
   std::string player_name = player_;
   if (player_name == "playerctld") {
@@ -510,6 +512,8 @@ auto Mpris::getPlayerInfo() -> std::optional<PlayerInfo> {
     if (error) {
       throw std::runtime_error(fmt::format("unable to list players: {}", error->message));
     }
+    waybar::util::ScopeGuard players_deleter(
+        [&players]() { g_list_free_full(players, (GDestroyNotify)playerctl_player_name_free); });
     // > get the list of players [..] in order of activity
     // https://github.com/altdesktop/playerctl/blob/b19a71cb9dba635df68d271bd2b3f6a99336a223/playerctl/playerctl-common.c#L248-L249
     PlayerctlPlayer* first_valid_player = nullptr;
@@ -523,7 +527,10 @@ auto Mpris::getPlayerInfo() -> std::optional<PlayerInfo> {
         continue;
       }
       auto* tmp = playerctl_player_new_from_name(pn, &error);
-      if (error || !tmp) continue;
+      if (error || !tmp) {
+        g_clear_error(&error);
+        continue;
+      }
       if (!first_valid_player) {
         first_valid_player = tmp;
         first_valid_name = name;
@@ -549,6 +556,7 @@ auto Mpris::getPlayerInfo() -> std::optional<PlayerInfo> {
     return std::nullopt;
   } else {
     last_active_player_ = player;
+    g_object_ref(last_active_player_);
   }
 
   g_object_get(last_active_player_, "status", &player_status, "playback-status",
@@ -570,6 +578,7 @@ auto Mpris::getPlayerInfo() -> std::optional<PlayerInfo> {
       .title = std::nullopt,
       .length = std::nullopt,
   };
+  g_free(player_status);
 
   if (auto* artist_ = playerctl_player_get_artist(last_active_player_, &error)) {
     spdlog::debug("mpris[{}]: artist = {}", info.name, artist_);
