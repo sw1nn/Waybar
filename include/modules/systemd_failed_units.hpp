@@ -1,6 +1,7 @@
 #pragma once
 
 #include <giomm/dbusproxy.h>
+#include <sigc++/connection.h>
 
 #include <string>
 #include <vector>
@@ -12,7 +13,7 @@ namespace waybar::modules {
 class SystemdFailedUnits : public ALabel {
  public:
   SystemdFailedUnits(const std::string&, const Json::Value&);
-  virtual ~SystemdFailedUnits() = default;
+  virtual ~SystemdFailedUnits();
   auto update() -> void override;
 
  private:
@@ -38,6 +39,11 @@ class SystemdFailedUnits : public ALabel {
   Glib::RefPtr<Gio::DBus::Proxy> system_props_proxy_, user_props_proxy_;
   Glib::RefPtr<Gio::DBus::Proxy> system_manager_proxy_, user_manager_proxy_;
   std::vector<FailedUnit> failed_units_;
+  // The debounced updateData() timer, kept so we can cancel it on destruction.
+  // Without this, a config reload that destroys the module within
+  // UPDATE_DEBOUNCE_TIME_MS of a PropertiesChanged signal causes the timer to
+  // fire against freed memory.
+  sigc::connection update_timer_conn_;
 
   void notify_cb(const Glib::ustring& sender_name, const Glib::ustring& signal_name,
                  const Glib::VariantContainerBase& arguments);

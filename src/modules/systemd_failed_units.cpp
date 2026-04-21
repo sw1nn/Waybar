@@ -89,14 +89,26 @@ SystemdFailedUnits::SystemdFailedUnits(const std::string& id, const Json::Value&
   dp.emit();
 }
 
+SystemdFailedUnits::~SystemdFailedUnits() { update_timer_conn_.disconnect(); }
+
 auto SystemdFailedUnits::notify_cb(const Glib::ustring& sender_name,
                                    const Glib::ustring& signal_name,
                                    const Glib::VariantContainerBase& arguments) -> void {
   if (signal_name == "PropertiesChanged" && !update_pending_) {
     update_pending_ = true;
     /* The fail count may fluctuate due to restarting. */
-    Glib::signal_timeout().connect_once(sigc::mem_fun(*this, &SystemdFailedUnits::updateData),
-                                        UPDATE_DEBOUNCE_TIME_MS);
+    // Use connect() (not connect_once()) so we get a sigc::connection we can
+    // disconnect in the destructor. glibmm's connect_once() is documented to
+    // have a sigc::trackable auto-disconnect bug (GNOME #396963, #512348) and
+    // returns void, so relying on it lets the timer fire against freed memory
+    // if the module is destroyed (e.g. by a config reload) inside the
+    // debounce window.
+    update_timer_conn_ = Glib::signal_timeout().connect(
+        [this]() {
+          updateData();
+          return false;
+        },
+        UPDATE_DEBOUNCE_TIME_MS);
   }
 }
 
